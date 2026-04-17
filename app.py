@@ -205,7 +205,6 @@ def get_rule_based_insights(df: pd.DataFrame):
     steps_df = df.dropna(subset=["Steps"]).copy()
     mood_df = df.dropna(subset=["Mood"]).copy()
 
-    # Son 3 kilo kaydı trendi
     last_3_weights = weight_df.tail(3)
     if len(last_3_weights) >= 3:
         first_w = last_3_weights["Weight"].iloc[0]
@@ -218,7 +217,6 @@ def get_rule_based_insights(df: pd.DataFrame):
         else:
             insights.append(("neutral", "Son 3 kilo kaydında yatay seyir var."))
 
-    # Son 5 kilo kaydında plato kontrolü
     last_5_weights = weight_df.tail(5)
     if len(last_5_weights) >= 5:
         total_change_5 = last_5_weights["Weight"].iloc[-1] - last_5_weights["Weight"].iloc[0]
@@ -227,7 +225,6 @@ def get_rule_based_insights(df: pd.DataFrame):
         elif total_change_5 <= -0.5:
             insights.append(("positive", "Son 5 kilo kaydında belirgin düşüş var."))
 
-    # Son 7 kayıt adım ortalaması
     last_7_steps = steps_df.tail(7)
     if len(last_7_steps) >= 3:
         avg_steps = last_7_steps["Steps"].mean()
@@ -238,7 +235,6 @@ def get_rule_based_insights(df: pd.DataFrame):
         else:
             insights.append(("neutral", f"Aktivite orta seviyede: Ortalama adım {avg_steps:,.0f}.".replace(",", ".")))
 
-    # Son 7 kayıt mood ortalaması
     last_7_mood = mood_df.tail(7)
     if len(last_7_mood) >= 3:
         avg_mood = last_7_mood["Mood"].mean()
@@ -249,7 +245,6 @@ def get_rule_based_insights(df: pd.DataFrame):
         else:
             insights.append(("neutral", f"Mood dengeli: Ortalama {avg_mood:.1f}."))
 
-    # Son 3 değişimin yönü
     if len(weight_df) >= 4:
         recent_changes = weight_df["Weight"].diff().tail(3)
         if (recent_changes > 0).sum() >= 2:
@@ -365,6 +360,29 @@ if df.empty:
     st.info("Henüz veri yok. Excel yükleyebilir veya yeni kayıt ekleyebilirsin.")
     st.stop()
 
+# 1) EN ÜSTTE KILO TRENDI
+st.markdown("### Kilo Trendi")
+
+weight_chart_df = df.dropna(subset=["Date", "Weight"]).copy()
+if not weight_chart_df.empty:
+    fig_weight = px.line(
+        weight_chart_df,
+        x="Date",
+        y="Weight",
+        markers=True,
+        title="",
+    )
+    st.plotly_chart(fig_weight, use_container_width=True)
+
+# 2) HEMEN ALTINDA TABLO
+st.markdown("### Kayıtlar")
+
+display_df = format_display_df(df)
+styled_df = display_df.style.map(style_weight_change, subset=["Weight_Change"])
+
+st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+# 3) SONRA ÖZET METRIKLER
 metrics = get_summary_metrics(df)
 
 m1, m2, m3, m4 = st.columns(4)
@@ -376,36 +394,19 @@ m3.metric(
 )
 m4.metric("Ortalama Mood", f"{metrics['avg_mood']}" if metrics["avg_mood"] is not None else "-")
 
+# 4) AKILLI YORUMLAR
 st.markdown("### Akıllı Yorumlar")
 
 insights = get_rule_based_insights(df)
 for level, text in insights:
     render_insight_box(level, text)
 
-st.markdown("### Kayıtlar")
-
-display_df = format_display_df(df)
-styled_df = display_df.style.map(style_weight_change, subset=["Weight_Change"])
-
-st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-st.markdown("### Grafikler")
+# 5) EN ALTA DIGER GRAFIKLER
+st.markdown("### Diğer Grafikler")
 
 g1, g2 = st.columns(2)
 
 with g1:
-    weight_chart_df = df.dropna(subset=["Date", "Weight"]).copy()
-    if not weight_chart_df.empty:
-        fig_weight = px.line(
-            weight_chart_df,
-            x="Date",
-            y="Weight",
-            markers=True,
-            title="Kilo Trendi",
-        )
-        st.plotly_chart(fig_weight, use_container_width=True)
-
-with g2:
     steps_chart_df = df.dropna(subset=["Date", "Steps"]).copy()
     if not steps_chart_df.empty:
         fig_steps = px.bar(
@@ -416,16 +417,17 @@ with g2:
         )
         st.plotly_chart(fig_steps, use_container_width=True)
 
-mood_chart_df = df.dropna(subset=["Date", "Mood"]).copy()
-if not mood_chart_df.empty:
-    fig_mood = px.line(
-        mood_chart_df,
-        x="Date",
-        y="Mood",
-        markers=True,
-        title="Mood Trendi",
-    )
-    st.plotly_chart(fig_mood, use_container_width=True)
+with g2:
+    mood_chart_df = df.dropna(subset=["Date", "Mood"]).copy()
+    if not mood_chart_df.empty:
+        fig_mood = px.line(
+            mood_chart_df,
+            x="Date",
+            y="Mood",
+            markers=True,
+            title="Mood Trendi",
+        )
+        st.plotly_chart(fig_mood, use_container_width=True)
 
 st.markdown("### Dışa aktar")
 
