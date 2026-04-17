@@ -1,14 +1,46 @@
 import io
+import os
 from datetime import date
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import psycopg2
 import streamlit as st
 
 st.set_page_config(page_title="Personal Data App", layout="wide")
 
 EXPECTED_COLUMNS = ["Date", "Weight", "Steps", "Mood", "Notes"]
+
+
+def get_connection():
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        raise ValueError("DATABASE_URL bulunamadı.")
+    return psycopg2.connect(db_url)
+
+
+def ensure_table_exists():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS health_data (
+            id SERIAL PRIMARY KEY,
+            date DATE,
+            weight DOUBLE PRECISION,
+            steps INTEGER,
+            mood INTEGER,
+            notes TEXT,
+            UNIQUE (date, weight, steps, mood, notes)
+        )
+        """
+    )
+
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -19,6 +51,16 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_columns(df)
+
+    # DB'den gelen kolon isimleri küçük olabilir, onları standardize et
+    rename_map = {
+        "date": "Date",
+        "weight": "Weight",
+        "steps": "Steps",
+        "mood": "Mood",
+        "notes": "Notes",
+    }
+    df = df.rename(columns=rename_map)
 
     missing = [col for col in EXPECTED_COLUMNS if col not in df.columns]
     if missing:
@@ -33,15 +75,68 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
     df["Steps"] = pd.to_numeric(df["Steps"], errors="coerce")
     df["Mood"] = pd.to_numeric(df["Mood"], errors="coerce")
-    df["Notes"] = df["Notes"].fillna("").astype(str)
+    df["Notes"] = df["Notes"].fillna("").astype(str).str.strip()
 
     df = df.sort_values("Date", na_position="last").reset_index(drop=True)
 
-    # Weight boş değilse önceki dolu kiloya göre fark hesapla
+    # Weight_Change: bir önceki dolu kiloya göre fark
     df["Weight_Change"] = df["Weight"] - df["Weight"].ffill().shift(1)
     df.loc[df["Weight"].isna(), "Weight_Change"] = np.nan
 
     return df
+
+
+def insert_dataframe_to_db(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+
+    conn = get_connection()
+    cur = conn.cursor()
+    inserted_count = 0
+
+    for _, row in df.iterrows():
+        row_date = row["Date"]
+        row_weight = row["Weight"]
+        row_steps = row["Steps"]
+        row_mood = row["Mood"]
+        row_notes = row["Notes"]
+
+        # NaN -> None
+        row_date = None if pd.isna(row_date) else pd.to_datetime(row_date).date()
+        row_weight = None if pd.isna(row_weight) else float(row_weight)
+        row_steps = None if pd.isna(row_steps) else int(row_steps)
+        row_mood = None if pd.isna(row_mood) else int(row_mood)
+        row_notes = "" if pd.isna(row_notes) else str(row_notes).strip()
+
+        cur.execute(
+            """
+            INSERT INTO health_data (date, weight, steps, mood, notes)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (date, weight, steps, mood, notes) DO NOTHING
+            """,
+            (row_date, row_weight, row_steps, row_mood, row_notes),
+        )
+
+        if cur.rowcount > 0:
+            inserted_count += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return inserted_count
+
+
+def load_data_from_db() -> pd.DataFrame:
+    conn = get_connection()
+    query = """
+        SELECT date, weight, steps, mood, notes
+        FROM health_data
+        ORDER BY date, id
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return prepare_dataframe(df)
 
 
 def format_display_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -69,6 +164,7 @@ def format_display_df(df: pd.DataFrame) -> pd.DataFrame:
 def style_weight_change(val):
     if val == "":
         return ""
+
     try:
         numeric_val = float(val.replace(",", "."))
     except Exception:
@@ -107,7 +203,9 @@ def get_summary_metrics(df: pd.DataFrame):
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
+
     export_df = df.copy()
+    export_df["Date"] = export_df["Date"].dt.date
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="Data")
@@ -115,15 +213,20 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+# ---- APP START ----
+
 st.title("Personal Data App")
-st.caption("Excel yükle, hesaplamaları uygulama yapsın.")
+st.caption("Excel yükle, veriyi DB'ye kaydet, dashboard'u uygulama oluştursun.")
+
+try:
+    ensure_table_exists()
+except Exception as e:
+    st.error(f"Veritabanı bağlantı hatası: {e}")
+    st.stop()
 
 uploaded_file = st.file_uploader(
     "Excel dosyasını yükle", type=["xlsx", "xls"], accept_multiple_files=False
 )
-
-if "working_df" not in st.session_state:
-    st.session_state.working_df = None
 
 if uploaded_file is not None:
     try:
@@ -132,36 +235,32 @@ if uploaded_file is not None:
 
         raw_df = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
         prepared_df = prepare_dataframe(raw_df)
-        st.session_state.working_df = prepared_df.copy()
+
+        inserted_count = insert_dataframe_to_db(prepared_df)
+        st.success(f"Upload tamamlandı. Yeni eklenen kayıt sayısı: {inserted_count}")
 
     except Exception as e:
-        st.error(f"Excel okunurken hata oluştu: {e}")
+        st.error(f"Excel işlenirken hata oluştu: {e}")
         st.stop()
 
-if st.session_state.working_df is None:
-    st.info("Başlamak için uygun kolonlara sahip Excel dosyanı yükle.")
-    st.markdown(
-        """
-Gerekli kolonlar:
-- `Date`
-- `Weight`
-- `Steps`
-- `Mood`
-- `Notes`
-"""
-    )
-    st.stop()
-
-df = st.session_state.working_df.copy()
-
+# Yeni kayıt ekleme
 with st.expander("Yeni kayıt ekle", expanded=False):
     col1, col2, col3 = st.columns(3)
+
     with col1:
         new_date = st.date_input("Tarih", value=date.today())
-        new_weight = st.number_input("Kilo", min_value=0.0, max_value=300.0, value=90.0, step=0.1)
+        new_weight = st.number_input(
+            "Kilo", min_value=0.0, max_value=300.0, value=90.0, step=0.1
+        )
+
     with col2:
-        new_steps = st.number_input("Adım", min_value=0, max_value=100000, value=10000, step=500)
-        new_mood = st.number_input("Mood", min_value=0, max_value=100, value=10, step=1)
+        new_steps = st.number_input(
+            "Adım", min_value=0, max_value=100000, value=10000, step=500
+        )
+        new_mood = st.number_input(
+            "Mood", min_value=0, max_value=100, value=10, step=1
+        )
+
     with col3:
         new_notes = st.text_input("Not", value="")
 
@@ -177,13 +276,31 @@ with st.expander("Yeni kayıt ekle", expanded=False):
                 }
             ]
         )
-        combined = pd.concat([df[EXPECTED_COLUMNS], new_row], ignore_index=True)
-        combined = prepare_dataframe(combined)
-        st.session_state.working_df = combined
-        st.success("Yeni kayıt eklendi.")
-        st.rerun()
 
+        try:
+            inserted_count = insert_dataframe_to_db(new_row)
+            if inserted_count > 0:
+                st.success("Yeni kayıt DB'ye eklendi.")
+            else:
+                st.warning("Bu kayıt zaten vardı, tekrar eklenmedi.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Kayıt eklenirken hata oluştu: {e}")
+
+# DB'den oku
+try:
+    df = load_data_from_db()
+except Exception as e:
+    st.error(f"DB'den veri okunurken hata oluştu: {e}")
+    st.stop()
+
+if df.empty:
+    st.info("Henüz veri yok. Excel yükleyebilir veya yeni kayıt ekleyebilirsin.")
+    st.stop()
+
+# Özet metrikler
 metrics = get_summary_metrics(df)
+
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Son Kilo", f"{metrics['last_weight']:.1f}" if metrics["last_weight"] is not None else "-")
 m2.metric("Başlangıç Kilo", f"{metrics['first_weight']:.1f}" if metrics["first_weight"] is not None else "-")
@@ -193,6 +310,7 @@ m3.metric(
 )
 m4.metric("Ortalama Mood", f"{metrics['avg_mood']}" if metrics["avg_mood"] is not None else "-")
 
+# Tablo
 st.markdown("### Kayıtlar")
 
 display_df = format_display_df(df)
@@ -200,6 +318,7 @@ styled_df = display_df.style.map(style_weight_change, subset=["Weight_Change"])
 
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
+# Grafikler
 st.markdown("### Grafikler")
 
 g1, g2 = st.columns(2)
@@ -238,6 +357,7 @@ if not mood_chart_df.empty:
     )
     st.plotly_chart(fig_mood, use_container_width=True)
 
+# Dışa aktar
 st.markdown("### Dışa aktar")
 
 col_a, col_b = st.columns(2)
