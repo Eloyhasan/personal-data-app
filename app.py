@@ -25,7 +25,6 @@ def get_connection():
 def ensure_table_exists():
     conn = get_connection()
     cur = conn.cursor()
-
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS health_data (
@@ -39,7 +38,6 @@ def ensure_table_exists():
         )
         """
     )
-
     conn.commit()
     cur.close()
     conn.close()
@@ -271,7 +269,6 @@ def render_insight_box(level: str, text: str):
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
-
     export_df = df.copy()
     export_df["Date"] = export_df["Date"].dt.date
 
@@ -282,10 +279,6 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 def remove_weight_outliers(weight_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Median Absolute Deviation ile uç değer temizliği.
-    Veri azsa olduğu gibi döner.
-    """
     clean_df = weight_df.copy()
     if len(clean_df) < 5:
         return clean_df
@@ -307,21 +300,12 @@ def remove_weight_outliers(weight_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_prediction(df: pd.DataFrame):
-    """
-    Tahmin için:
-    - son 10 dolu kilo kaydı
-    - outlier temizleme
-    - 3 noktalı smoothing
-    - lineer trend
-    - güven aralığı
-    """
     weight_df = df.dropna(subset=["Weight"])[["Date", "Weight"]].tail(10).copy()
 
     if len(weight_df) < 3:
         return None
 
     filtered_df = remove_weight_outliers(weight_df)
-
     if len(filtered_df) < 3:
         filtered_df = weight_df.copy()
 
@@ -344,11 +328,9 @@ def calculate_prediction(df: pd.DataFrame):
     if np.isnan(residual_std):
         residual_std = 0.0
 
-    # Tahmin çizgisi son gerçek noktadan devam etsin
     future_t = np.arange(len(model_df) - 1, len(model_df) + FORECAST_DAYS)
     future_pred = slope * future_t + intercept
 
-    # Güven bandı hafif genişleyerek artsın
     horizon_index = np.arange(len(future_t))
     ci_multiplier = np.sqrt(horizon_index + 1)
     ci_width = 1.96 * residual_std * ci_multiplier
@@ -366,7 +348,6 @@ def calculate_prediction(df: pd.DataFrame):
 
     forecast_start_date = model_df["Date"].iloc[-1]
     future_dates = [forecast_start_date + timedelta(days=i) for i in range(len(future_t))]
-
     predicted_weight_7d = float(future_pred[-1])
 
     return {
@@ -383,53 +364,75 @@ def calculate_prediction(df: pd.DataFrame):
     }
 
 
-def build_prediction_chart(df: pd.DataFrame, prediction_result: dict | None):
+def build_trend_chart(df: pd.DataFrame):
+    actual_df = df.dropna(subset=["Date", "Weight"]).copy().sort_values("Date")
     fig = go.Figure()
 
-    actual_df = df.dropna(subset=["Date", "Weight"]).copy()
-
-    # Gerçek veri
     fig.add_trace(
         go.Scatter(
             x=actual_df["Date"],
             y=actual_df["Weight"],
             mode="lines+markers",
-            name="Gerçek",
+            name="Gerçek Kilo",
             line=dict(width=3),
             marker=dict(size=7),
             hovertemplate="Tarih: %{x|%d.%m.%Y}<br>Kilo: %{y:.1f}<extra></extra>",
         )
     )
 
-    # Hedef çizgisi
-    if not actual_df.empty and prediction_result is not None:
-        x_end = prediction_result["future_dates"][-1]
-    elif not actual_df.empty:
-        x_end = actual_df["Date"].max() + timedelta(days=FORECAST_DAYS)
-    else:
-        x_end = date.today() + timedelta(days=FORECAST_DAYS)
+    if len(actual_df) >= 3:
+        trend_df = actual_df.copy()
+        trend_df["Weight_MA3"] = trend_df["Weight"].rolling(window=3, min_periods=1).mean()
 
-    if not actual_df.empty:
-        x_start = actual_df["Date"].min()
         fig.add_trace(
             go.Scatter(
-                x=[x_start, x_end],
-                y=[TARGET_WEIGHT, TARGET_WEIGHT],
+                x=trend_df["Date"],
+                y=trend_df["Weight_MA3"],
                 mode="lines",
-                name=f"Hedef ({TARGET_WEIGHT:.1f})",
+                name="3 Kayıt Ortalaması",
                 line=dict(width=2, dash="dot"),
-                hovertemplate="Hedef kilo: %{y:.1f}<extra></extra>",
+                hovertemplate="Tarih: %{x|%d.%m.%Y}<br>Trend Ort.: %{y:.1f}<extra></extra>",
             )
         )
 
-    # Tahmin + güven aralığı
+    fig.update_layout(
+        height=430,
+        margin=dict(l=20, r=20, t=20, b=20),
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.02, x=1, xanchor="right"),
+        xaxis_title="",
+        yaxis_title="Kilo",
+    )
+    fig.update_yaxes(tickformat=".1f")
+    return fig
+
+
+def build_prediction_chart(df: pd.DataFrame, prediction_result: dict | None):
+    fig = go.Figure()
+    actual_df = df.dropna(subset=["Date", "Weight"]).copy().sort_values("Date")
+
+    if actual_df.empty:
+        return fig
+
+    last_actual_date = actual_df["Date"].max()
+
+    fig.add_trace(
+        go.Scatter(
+            x=[actual_df["Date"].min(), last_actual_date + timedelta(days=FORECAST_DAYS)],
+            y=[TARGET_WEIGHT, TARGET_WEIGHT],
+            mode="lines",
+            name=f"Hedef ({TARGET_WEIGHT:.1f})",
+            line=dict(width=2, dash="dot"),
+            hovertemplate="Hedef kilo: %{y:.1f}<extra></extra>",
+        )
+    )
+
     if prediction_result is not None:
         future_dates = prediction_result["future_dates"]
         future_pred = prediction_result["future_pred"]
         forecast_upper = prediction_result["forecast_upper"]
         forecast_lower = prediction_result["forecast_lower"]
 
-        # Güven bandı
         fig.add_trace(
             go.Scatter(
                 x=future_dates,
@@ -453,36 +456,93 @@ def build_prediction_chart(df: pd.DataFrame, prediction_result: dict | None):
             )
         )
 
-        # Tahmin çizgisi
         fig.add_trace(
             go.Scatter(
                 x=future_dates,
                 y=future_pred,
-                mode="lines",
+                mode="lines+markers",
                 name="Tahmin",
                 line=dict(width=3, dash="dash"),
+                marker=dict(size=6),
                 hovertemplate="Tahmin tarihi: %{x|%d.%m.%Y}<br>Tahmini kilo: %{y:.1f}<extra></extra>",
             )
         )
 
     fig.update_layout(
-        height=460,
+        height=430,
         margin=dict(l=20, r=20, t=20, b=20),
         hovermode="x unified",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-        ),
+        legend=dict(orientation="h", y=1.02, x=1, xanchor="right"),
         xaxis_title="",
-        yaxis_title="Kilo",
+        yaxis_title="Tahmini Kilo",
     )
-
     fig.update_yaxes(tickformat=".1f")
-
     return fig
+
+
+def get_trend_insights(df: pd.DataFrame):
+    insights = []
+    weight_df = df.dropna(subset=["Weight"]).copy().sort_values("Date")
+
+    if len(weight_df) >= 3:
+        last_3 = weight_df.tail(3)
+        first_w = last_3["Weight"].iloc[0]
+        last_w = last_3["Weight"].iloc[-1]
+
+        if last_w < first_w:
+            insights.append(("positive", "Trend analizi: Son 3 kilo kaydında aşağı yönlü hareket var."))
+        elif last_w > first_w:
+            insights.append(("warning", "Trend analizi: Son 3 kilo kaydında yukarı yönlü hareket var."))
+        else:
+            insights.append(("neutral", "Trend analizi: Son 3 kilo kaydında yatay seyir var."))
+
+    if len(weight_df) >= 5:
+        last_5 = weight_df.tail(5)
+        delta_5 = last_5["Weight"].iloc[-1] - last_5["Weight"].iloc[0]
+
+        if -0.2 <= delta_5 <= 0.2:
+            insights.append(("warning", "Trend analizi: Son 5 kayıtta plato sinyali var."))
+        elif delta_5 <= -0.5:
+            insights.append(("positive", "Trend analizi: Son 5 kayıtta belirgin düşüş var."))
+
+    if not insights:
+        insights.append(("neutral", "Trend analizi için daha fazla kilo verisi birikince daha güçlü yorumlar oluşur."))
+
+    return insights
+
+
+def get_prediction_insights(prediction_result):
+    insights = []
+
+    if prediction_result is None:
+        insights.append(("neutral", "Tahmin motoru için en az 3 dolu kilo kaydı gerekir."))
+        return insights
+
+    slope = prediction_result["slope"]
+    days_to_target = prediction_result["days_to_target"]
+    predicted_weight_7d = prediction_result["predicted_weight_7d"]
+    residual_std = prediction_result["residual_std"]
+
+    if slope < 0:
+        insights.append(("positive", "Tahmin motoru olumlu sinyal veriyor: kısa vadeli projeksiyon aşağı yönlü."))
+    elif slope > 0:
+        insights.append(("warning", "Tahmin motoru dikkat uyarısı veriyor: kısa vadeli projeksiyon yukarı yönlü."))
+    else:
+        insights.append(("neutral", "Tahmin motoru yatay bir projeksiyon görüyor."))
+
+    insights.append(("neutral", f"7 gün sonrası tahmini kilo yaklaşık {predicted_weight_7d:.1f} kg."))
+
+    if days_to_target is not None:
+        insights.append(("positive", f"Mevcut projeksiyonla {TARGET_WEIGHT:.1f} kg hedefine yaklaşık {days_to_target} gün içinde ulaşabilirsin."))
+    else:
+        insights.append(("warning", "Mevcut projeksiyon hedef kiloya yaklaşmayı göstermiyor."))
+
+    if residual_std >= 0.15:
+        insights.append(("warning", "Tahmin oynaklığı yüksek: yakın dönem veri dalgalı, projeksiyon dikkatle yorumlanmalı."))
+    else:
+        insights.append(("neutral", "Tahmin oynaklığı görece düşük: kısa vadeli projeksiyon daha tutarlı görünüyor."))
+
+    return insights
 
 
 st.title("Smart Body Tracker")
@@ -518,17 +578,11 @@ with st.expander("Yeni kayıt ekle", expanded=False):
 
     with col1:
         new_date = st.date_input("Tarih", value=date.today())
-        new_weight = st.number_input(
-            "Kilo", min_value=0.0, max_value=300.0, value=90.0, step=0.1
-        )
+        new_weight = st.number_input("Kilo", min_value=0.0, max_value=300.0, value=90.0, step=0.1)
 
     with col2:
-        new_steps = st.number_input(
-            "Adım", min_value=0, max_value=100000, value=10000, step=500
-        )
-        new_mood = st.number_input(
-            "Mood", min_value=0, max_value=100, value=10, step=1
-        )
+        new_steps = st.number_input("Adım", min_value=0, max_value=100000, value=10000, step=500)
+        new_mood = st.number_input("Mood", min_value=0, max_value=100, value=10, step=1)
 
     with col3:
         new_notes = st.text_input("Not", value="")
@@ -566,47 +620,52 @@ if df.empty:
     st.info("Henüz veri yok. Excel yükleyebilir veya yeni kayıt ekleyebilirsin.")
     st.stop()
 
-# 1) EN ÜSTTE PROFESYONEL TAHMİN GRAFİĞİ
-st.markdown("### Kilo Trendi + Tahmin")
-
 prediction_result = calculate_prediction(df)
+metrics = get_summary_metrics(df)
+
+# 1) TREND ANALIZI
+st.markdown("### 📊 Kilo Trend Analizi")
+trend_chart = build_trend_chart(df)
+st.plotly_chart(trend_chart, use_container_width=True)
+st.caption("Bu grafik sadece gerçekleşen kilo kayıtlarını ve kısa dönem trend ortalamasını gösterir.")
+
+trend_insights = get_trend_insights(df)
+for level, text in trend_insights:
+    render_insight_box(level, text)
+
+# 2) TAHMIN
+st.markdown("### 🔮 Kilo Tahmini (7 Gün)")
 prediction_chart = build_prediction_chart(df, prediction_result)
 st.plotly_chart(prediction_chart, use_container_width=True)
 
 if prediction_result is not None:
     st.caption(
-        "Tahmin, son kilo kayıtlarının temizlenmiş ve yumuşatılmış trendine göre hesaplanır. "
-        "Kesikli çizgi projeksiyonu, gölgeli alan yaklaşık güven aralığını gösterir."
+        "Bu grafik gelecek 7 gün için projeksiyon gösterir. "
+        "Kesikli çizgi tahmini, gölgeli alan yaklaşık güven aralığını, yatay çizgi hedef kiloyu gösterir."
     )
 else:
-    st.caption("Tahmin için en az 3 adet dolu kilo kaydı gerekir.")
+    st.caption("Tahmin için yeterli dolu kilo kaydı yok.")
 
-# 2) TABLO
+# 3) KAYITLAR
 st.markdown("### Kayıtlar")
-
 display_df = format_display_df(df)
 styled_df = display_df.style.map(style_weight_change, subset=["Weight_Change"])
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-# 3) ÖZET METRİKLER
-metrics = get_summary_metrics(df)
-
+# 4) OZET METRIKLER
+st.markdown("### Özet")
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Son Kilo", f"{metrics['last_weight']:.1f}" if metrics["last_weight"] is not None else "-")
 m2.metric("Başlangıç Kilo", f"{metrics['first_weight']:.1f}" if metrics["first_weight"] is not None else "-")
-m3.metric(
-    "Toplam Kilo Değişimi",
-    f"{metrics['total_change']:+.1f}" if metrics["total_change"] is not None else "-",
-)
+m3.metric("Toplam Kilo Değişimi", f"{metrics['total_change']:+.1f}" if metrics["total_change"] is not None else "-")
 
 if prediction_result is not None:
     m4.metric("7 Gün Tahmini", f"{prediction_result['predicted_weight_7d']:.1f}")
 else:
     m4.metric("7 Gün Tahmini", "-")
 
-# 4) PREDICTION ÖZETİ
+# 5) TAHMIN OZETI
 st.markdown("### Tahmin Özeti")
-
 p1, p2, p3 = st.columns(3)
 
 if prediction_result is not None:
@@ -614,50 +673,27 @@ if prediction_result is not None:
     days_to_target = prediction_result["days_to_target"]
     residual_std = prediction_result["residual_std"]
 
-    if slope < 0:
-        trend_text = f"{slope:.3f} kg/gün"
-    elif slope > 0:
-        trend_text = f"+{slope:.3f} kg/gün"
-    else:
-        trend_text = "0.000 kg/gün"
-
-    p1.metric("Günlük Trend", trend_text)
-
-    if days_to_target is not None:
-        p2.metric("Hedefe Tahmini Gün", str(days_to_target))
-    else:
-        p2.metric("Hedefe Tahmini Gün", "Belirsiz")
-
-    p3.metric("Model Oynaklığı", f"{residual_std:.2f}")
+    trend_text = f"{slope:+.3f} kg/gün"
+    p1.metric("Günlük Tahmini Eğilim", trend_text)
+    p2.metric("Hedefe Tahmini Gün", str(days_to_target) if days_to_target is not None else "Belirsiz")
+    p3.metric("Tahmin Oynaklığı", f"{residual_std:.2f}")
 else:
-    p1.metric("Günlük Trend", "-")
+    p1.metric("Günlük Tahmini Eğilim", "-")
     p2.metric("Hedefe Tahmini Gün", "-")
-    p3.metric("Model Oynaklığı", "-")
+    p3.metric("Tahmin Oynaklığı", "-")
 
-# 5) AKILLI YORUMLAR
-st.markdown("### Akıllı Yorumlar")
-
-insights = get_rule_based_insights(df)
-for level, text in insights:
+prediction_insights = get_prediction_insights(prediction_result)
+for level, text in prediction_insights:
     render_insight_box(level, text)
 
-if prediction_result is not None:
-    slope = prediction_result["slope"]
-    days_to_target = prediction_result["days_to_target"]
+# 6) GENEL AKILLI YORUMLAR
+st.markdown("### Genel Akıllı Yorumlar")
+general_insights = get_rule_based_insights(df)
+for level, text in general_insights:
+    render_insight_box(level, text)
 
-    if slope < 0:
-        st.success("Tahmin motoru olumlu sinyal veriyor: kısa vadeli trend aşağı yönlü.")
-    elif slope > 0:
-        st.warning("Tahmin motoru dikkat uyarısı veriyor: kısa vadeli trend yukarı yönlü.")
-
-    if days_to_target is not None:
-        st.info(f"Mevcut tempoyla {TARGET_WEIGHT:.1f} kg hedefine yaklaşık {days_to_target} gün içinde ulaşabilirsin.")
-    elif slope >= 0:
-        st.warning("Mevcut tahmin eğilimi hedef kiloya yaklaşmayı göstermiyor. Aktivite ve düzen yeniden gözden geçirilmeli.")
-
-# 6) DİĞER GRAFİKLER
+# 7) DIGER GRAFIKLER
 st.markdown("### Diğer Grafikler")
-
 g1, g2 = st.columns(2)
 
 with g1:
@@ -703,9 +739,8 @@ with g2:
         )
         st.plotly_chart(fig_mood, use_container_width=True)
 
-# 7) DIŞA AKTAR
+# 8) DISA AKTAR
 st.markdown("### Dışa aktar")
-
 col_a, col_b = st.columns(2)
 
 with col_a:
