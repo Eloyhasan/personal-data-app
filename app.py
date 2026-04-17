@@ -52,7 +52,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_columns(df)
 
-    # DB'den gelen kolon isimleri küçük olabilir, onları standardize et
     rename_map = {
         "date": "Date",
         "weight": "Weight",
@@ -79,7 +78,6 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.sort_values("Date", na_position="last").reset_index(drop=True)
 
-    # Weight_Change: bir önceki dolu kiloya göre fark
     df["Weight_Change"] = df["Weight"] - df["Weight"].ffill().shift(1)
     df.loc[df["Weight"].isna(), "Weight_Change"] = np.nan
 
@@ -101,7 +99,6 @@ def insert_dataframe_to_db(df: pd.DataFrame) -> int:
         row_mood = row["Mood"]
         row_notes = row["Notes"]
 
-        # NaN -> None
         row_date = None if pd.isna(row_date) else pd.to_datetime(row_date).date()
         row_weight = None if pd.isna(row_weight) else float(row_weight)
         row_steps = None if pd.isna(row_steps) else int(row_steps)
@@ -201,6 +198,80 @@ def get_summary_metrics(df: pd.DataFrame):
     }
 
 
+def get_rule_based_insights(df: pd.DataFrame):
+    insights = []
+
+    weight_df = df.dropna(subset=["Weight"]).copy()
+    steps_df = df.dropna(subset=["Steps"]).copy()
+    mood_df = df.dropna(subset=["Mood"]).copy()
+
+    # Son 3 kilo kaydı trendi
+    last_3_weights = weight_df.tail(3)
+    if len(last_3_weights) >= 3:
+        first_w = last_3_weights["Weight"].iloc[0]
+        last_w = last_3_weights["Weight"].iloc[-1]
+
+        if last_w < first_w:
+            insights.append(("positive", "Momentum olumlu: Son 3 kilo kaydında düşüş trendi var."))
+        elif last_w > first_w:
+            insights.append(("warning", "Dikkat: Son 3 kilo kaydında yükseliş trendi var."))
+        else:
+            insights.append(("neutral", "Son 3 kilo kaydında yatay seyir var."))
+
+    # Son 5 kilo kaydında plato kontrolü
+    last_5_weights = weight_df.tail(5)
+    if len(last_5_weights) >= 5:
+        total_change_5 = last_5_weights["Weight"].iloc[-1] - last_5_weights["Weight"].iloc[0]
+        if -0.2 <= total_change_5 <= 0.2:
+            insights.append(("warning", "Plato riski: Son 5 kilo kaydında anlamlı değişim yok."))
+        elif total_change_5 <= -0.5:
+            insights.append(("positive", "Son 5 kilo kaydında belirgin düşüş var."))
+
+    # Son 7 kayıt adım ortalaması
+    last_7_steps = steps_df.tail(7)
+    if len(last_7_steps) >= 3:
+        avg_steps = last_7_steps["Steps"].mean()
+        if avg_steps >= 10000:
+            insights.append(("positive", f"Aktivite güçlü: Son kayıtların ortalama adımı {avg_steps:,.0f}.".replace(",", ".")))
+        elif avg_steps < 8000:
+            insights.append(("warning", f"Aktivite düşük: Son kayıtların ortalama adımı {avg_steps:,.0f}.".replace(",", ".")))
+        else:
+            insights.append(("neutral", f"Aktivite orta seviyede: Ortalama adım {avg_steps:,.0f}.".replace(",", ".")))
+
+    # Son 7 kayıt mood ortalaması
+    last_7_mood = mood_df.tail(7)
+    if len(last_7_mood) >= 3:
+        avg_mood = last_7_mood["Mood"].mean()
+        if avg_mood >= 7:
+            insights.append(("positive", f"Mood iyi seviyede: Ortalama {avg_mood:.1f}."))
+        elif avg_mood < 6:
+            insights.append(("warning", f"Mood düşük: Ortalama {avg_mood:.1f}. Sürdürülebilirlik riski olabilir."))
+        else:
+            insights.append(("neutral", f"Mood dengeli: Ortalama {avg_mood:.1f}."))
+
+    # Son 3 değişimin yönü
+    if len(weight_df) >= 4:
+        recent_changes = weight_df["Weight"].diff().tail(3)
+        if (recent_changes > 0).sum() >= 2:
+            insights.append(("warning", "Son 3 değişimin en az 2'si artış yönünde. Düzen gözden geçirilmeli."))
+        elif (recent_changes < 0).sum() >= 2:
+            insights.append(("positive", "Son 3 değişimin çoğu düşüş yönünde. Düzen iyi çalışıyor görünüyor."))
+
+    if not insights:
+        insights.append(("neutral", "Yeterli veri oluştuğunda burada akıllı yorumlar görünecek."))
+
+    return insights
+
+
+def render_insight_box(level: str, text: str):
+    if level == "positive":
+        st.success(text)
+    elif level == "warning":
+        st.warning(text)
+    else:
+        st.info(text)
+
+
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
 
@@ -213,10 +284,8 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-# ---- APP START ----
-
 st.title("Personal Data App")
-st.caption("Excel yükle, veriyi DB'ye kaydet, dashboard'u uygulama oluştursun.")
+st.caption("Excel yükle, veriyi DB'ye kaydet, dashboard'u ve akıllı yorumları uygulama oluştursun.")
 
 try:
     ensure_table_exists()
@@ -243,7 +312,6 @@ if uploaded_file is not None:
         st.error(f"Excel işlenirken hata oluştu: {e}")
         st.stop()
 
-# Yeni kayıt ekleme
 with st.expander("Yeni kayıt ekle", expanded=False):
     col1, col2, col3 = st.columns(3)
 
@@ -287,7 +355,6 @@ with st.expander("Yeni kayıt ekle", expanded=False):
         except Exception as e:
             st.error(f"Kayıt eklenirken hata oluştu: {e}")
 
-# DB'den oku
 try:
     df = load_data_from_db()
 except Exception as e:
@@ -298,7 +365,6 @@ if df.empty:
     st.info("Henüz veri yok. Excel yükleyebilir veya yeni kayıt ekleyebilirsin.")
     st.stop()
 
-# Özet metrikler
 metrics = get_summary_metrics(df)
 
 m1, m2, m3, m4 = st.columns(4)
@@ -310,7 +376,12 @@ m3.metric(
 )
 m4.metric("Ortalama Mood", f"{metrics['avg_mood']}" if metrics["avg_mood"] is not None else "-")
 
-# Tablo
+st.markdown("### Akıllı Yorumlar")
+
+insights = get_rule_based_insights(df)
+for level, text in insights:
+    render_insight_box(level, text)
+
 st.markdown("### Kayıtlar")
 
 display_df = format_display_df(df)
@@ -318,7 +389,6 @@ styled_df = display_df.style.map(style_weight_change, subset=["Weight_Change"])
 
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-# Grafikler
 st.markdown("### Grafikler")
 
 g1, g2 = st.columns(2)
@@ -357,7 +427,6 @@ if not mood_chart_df.empty:
     )
     st.plotly_chart(fig_mood, use_container_width=True)
 
-# Dışa aktar
 st.markdown("### Dışa aktar")
 
 col_a, col_b = st.columns(2)
