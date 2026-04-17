@@ -8,7 +8,7 @@ import plotly.express as px
 import psycopg2
 import streamlit as st
 
-st.set_page_config(page_title="Personal Data App", layout="wide")
+st.set_page_config(page_title="Smart Body Tracker", layout="wide")
 
 EXPECTED_COLUMNS = ["Date", "Weight", "Steps", "Mood", "Notes"]
 
@@ -279,8 +279,8 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-st.title("Personal Data App")
-st.caption("Excel yükle, veriyi DB'ye kaydet, dashboard'u ve akıllı yorumları uygulama oluştursun.")
+st.title("Smart Body Tracker")
+st.caption("Track. Analyze. Improve.")
 
 try:
     ensure_table_exists()
@@ -360,7 +360,6 @@ if df.empty:
     st.info("Henüz veri yok. Excel yükleyebilir veya yeni kayıt ekleyebilirsin.")
     st.stop()
 
-# 1) EN ÜSTTE KILO TRENDI
 st.markdown("### Kilo Trendi")
 
 weight_chart_df = df.dropna(subset=["Date", "Weight"]).copy()
@@ -374,7 +373,6 @@ if not weight_chart_df.empty:
     )
     st.plotly_chart(fig_weight, use_container_width=True)
 
-# 2) HEMEN ALTINDA TABLO
 st.markdown("### Kayıtlar")
 
 display_df = format_display_df(df)
@@ -382,7 +380,6 @@ styled_df = display_df.style.map(style_weight_change, subset=["Weight_Change"])
 
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-# 3) SONRA ÖZET METRIKLER
 metrics = get_summary_metrics(df)
 
 m1, m2, m3, m4 = st.columns(4)
@@ -394,14 +391,12 @@ m3.metric(
 )
 m4.metric("Ortalama Mood", f"{metrics['avg_mood']}" if metrics["avg_mood"] is not None else "-")
 
-# 4) AKILLI YORUMLAR
 st.markdown("### Akıllı Yorumlar")
 
 insights = get_rule_based_insights(df)
 for level, text in insights:
     render_insight_box(level, text)
 
-# 5) EN ALTA DIGER GRAFIKLER
 st.markdown("### Diğer Grafikler")
 
 g1, g2 = st.columns(2)
@@ -438,7 +433,7 @@ with col_a:
     st.download_button(
         "CSV indir",
         data=csv_data,
-        file_name="personal_data_processed.csv",
+        file_name="smart_body_tracker_data.csv",
         mime="text/csv",
     )
 
@@ -447,6 +442,6 @@ with col_b:
     st.download_button(
         "Excel indir",
         data=excel_bytes,
-        file_name="personal_data_processed.xlsx",
+        file_name="smart_body_tracker_data.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
