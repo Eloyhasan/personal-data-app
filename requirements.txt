@@ -1,2 +1,6 @@
 streamlit
-psycopg2-binary
+pandas
+numpy
+plotly
+openpyxl
+xlrd
